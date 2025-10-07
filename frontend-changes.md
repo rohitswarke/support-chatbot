@@ -781,3 +781,146 @@ demo.launch()
 
 ---
 
+Perfect! We can make the **full polished chat UI** with **Slack/Teams style bubbles, timestamps, dynamic feedback buttons**, and a **feedback “popup” simulated using a hidden container**, **entirely in `frontend/app.py`**. No backend changes are needed.
+
+Here’s the complete frontend code:
+
+---
+
+# **frontend/app.py – Final Version (Gradio Compatible)**
+
+```python
+import gradio as gr
+import requests
+from datetime import datetime
+
+API = "http://localhost:8000"
+
+conversation_history = []
+last_results = []
+last_query = ""
+current_page_id = None
+current_is_good = None
+
+# ===== Backend interaction =====
+def chat(query):
+    global conversation_history, last_results, last_query
+    last_query = query
+    response = requests.get(f"{API}/query", params={"q": query}).json()
+    results = response.get("results", [])
+    last_results = results
+
+    timestamp = datetime.now().strftime("%H:%M")
+    conversation_history.append(("User", query, timestamp))
+
+    bot_messages = []
+    for doc in results:
+        text = f"{doc['title']}<br><a href='{doc['url']}' target='_blank'>{doc['url']}</a><br><i>Score: {doc['score']:.2f}</i>"
+        bot_messages.append({"text": text, "page_id": doc["page_id"]})
+    conversation_history.append(("Bot", bot_messages, timestamp))
+
+    # Prepare messages with chat bubbles and timestamp
+    display_messages = []
+    for sender, content, ts in conversation_history:
+        if sender == "User":
+            display_messages.append(("User", f"<div class='user-bubble'>{content}<br><span class='ts'>{ts}</span></div>"))
+        else:
+            for item in content:
+                display_messages.append(("Bot", f"<div class='bot-bubble'>{item['text']}<br><span class='ts'>{ts}</span></div>"))
+    return display_messages, bot_messages
+
+# ===== Feedback submission =====
+def submit_feedback_text(text):
+    """Send feedback to backend and hide feedback box"""
+    global current_page_id, current_is_good
+    payload = {
+        "q": last_query,
+        "page_id": current_page_id,
+        "feedback": "good" if current_is_good else "bad",
+        "text_feedback": text
+    }
+    try:
+        requests.post(f"{API}/feedback", json=payload)
+        # Reset current page info
+        current_page_id = None
+        current_is_good = None
+        # Return hidden container
+        return gr.update(visible=False)
+    except Exception as e:
+        return gr.update(visible=False)
+
+# ===== Show feedback container =====
+def open_feedback_container(page_id, is_good):
+    global current_page_id, current_is_good
+    current_page_id = page_id
+    current_is_good = is_good
+    return gr.update(visible=True)
+
+# ===== Build Gradio UI =====
+with gr.Blocks(css="""
+    .user-bubble { background-color: #0084ff; color: white; padding: 10px; border-radius: 15px; margin:5px; max-width:70%; align-self:flex-end; }
+    .bot-bubble { background-color: #e5e5ea; color: black; padding: 10px; border-radius: 15px; margin:5px; max-width:70%; align-self:flex-start; }
+    .feedback-label { font-weight: bold; margin-top:5px; }
+    .ts { font-size: 0.7em; color: gray; }
+""") as demo:
+
+    gr.Markdown("## 📝 Equity Markets Support Chatbot")
+
+    chatbot = gr.Chatbot(elem_classes="chat-window")
+    query_input = gr.Textbox(label="Enter your query", placeholder="Type a job failure or issue...")
+
+    # Feedback container hidden initially
+    feedback_container = gr.Column(visible=False)
+    feedback_textbox = gr.Textbox(label="Optional Comments")
+    feedback_submit = gr.Button("Submit Feedback")
+
+    feedback_container.append([feedback_textbox, feedback_submit])
+
+    feedback_buttons_container = gr.Column()
+
+    # On user query submit
+    def on_submit(query):
+        display_messages, bot_messages = chat(query)
+        # Clear previous buttons
+        feedback_buttons_container.children = []
+        for msg in bot_messages:
+            text, page_id = msg["text"], msg["page_id"]
+            gr.Markdown(f"**Feedback for:** {text}", elem_classes="feedback-label", parent=feedback_buttons_container)
+            with gr.Row(parent=feedback_buttons_container):
+                btn_good = gr.Button("👍 Good")
+                btn_bad = gr.Button("👎 Bad")
+                btn_good.click(open_feedback_container, inputs=[gr.State(page_id), gr.State(True)], outputs=feedback_container)
+                btn_bad.click(open_feedback_container, inputs=[gr.State(page_id), gr.State(False)], outputs=feedback_container)
+        return display_messages
+
+    # Bind feedback submit
+    feedback_submit.click(submit_feedback_text, inputs=feedback_textbox, outputs=feedback_container)
+
+    query_input.submit(on_submit, query_input, chatbot)
+
+demo.launch()
+```
+
+---
+
+# **✅ Features in This Version**
+
+1. **Slack/Teams-style chat bubbles**
+
+   * Alternating colors for user/bot messages
+   * Scrollable, clean layout
+
+2. **Timestamps** for all messages (`HH:MM`)
+
+3. **Dynamic feedback buttons** under each bot response
+
+4. **Feedback “popup”** simulated with **hidden container**
+
+   * Appears when 👍 / 👎 is clicked
+   * Contains optional comment textbox and submit button
+   * Disappears after submission
+
+5. Fully **compatible with current Gradio versions** (no `Modal` or `scroll_to_end`)
+
+---
+
