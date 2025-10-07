@@ -513,4 +513,218 @@ Once you start it, you’ll see logs like:
 
 ---
 
-Would you like me to integrate **Slack/Email alerts** (for example, when good feedback ratio drops below 60%) as part of the same scheduler?
+Excellent decision ✅ — keeping **FastAPI as the backend** will future-proof your chatbot system and make it enterprise-ready.
+
+Let’s summarize what your final architecture will look like (with FastAPI + Gradio + Scheduler), and then I’ll show you the complete base setup that your team can run and extend right away.
+
+---
+
+## 🧩 Final Architecture Overview
+
+```
+chatbot/
+│
+├── backend/
+│   ├── api.py              # FastAPI routes (query, feedback, admin)
+│   ├── scheduler.py        # APScheduler daily jobs (tag + evaluation)
+│   ├── main.py             # Starts FastAPI + Scheduler threads
+│
+├── frontend/
+│   └── app.py              # Gradio UI connecting to backend APIs
+│
+├── core/
+│   ├── config.py
+│   ├── db.py
+│   ├── search_engine.py
+│   ├── feedback_handler.py
+│   ├── tag_enricher.py
+│   ├── evaluator.py
+│   ├── synonym_map.py
+│   └── paraphraser.py
+│
+└── logs/
+    └── scheduler.log
+```
+
+---
+
+## 🧠 `backend/api.py`
+
+```python
+from fastapi import FastAPI, Query
+from core.search_engine import hybrid_search
+from core.feedback_handler import save_feedback
+from core.evaluator import evaluate_quality
+from core.tag_enricher import enrich_tags
+
+app = FastAPI(title="Confluence Chatbot API")
+
+@app.get("/query")
+def query_bot(q: str = Query(..., description="User query text")):
+    results = hybrid_search(q)
+    return {"query": q, "results": results}
+
+@app.post("/feedback")
+def feedback(q: str, page_id: str, feedback: str):
+    save_feedback(q, page_id, feedback)
+    return {"status": "success"}
+
+@app.get("/admin/summary")
+def admin_summary():
+    """Check latest evaluation and tags status."""
+    summary = evaluate_quality(save_to_db=False)
+    return {"evaluation": summary}
+
+@app.post("/admin/enrich_tags")
+def admin_enrich_tags():
+    """Trigger manual tag enrichment."""
+    enrich_tags()
+    return {"status": "tag enrichment complete"}
+```
+
+---
+
+## 🕓 `backend/scheduler.py`
+
+```python
+import logging
+from apscheduler.schedulers.background import BackgroundScheduler
+from core.tag_enricher import enrich_tags
+from core.evaluator import evaluate_quality
+
+logging.basicConfig(
+    filename="logs/scheduler.log",
+    level=logging.INFO,
+    format="%(asctime)s | %(levelname)s | %(message)s",
+)
+
+def job_tag_enrichment():
+    logging.info("🏷️ Tag enrichment started.")
+    try:
+        enrich_tags()
+        logging.info("✅ Tag enrichment completed successfully.")
+    except Exception as e:
+        logging.exception(f"❌ Tag enrichment failed: {e}")
+
+def job_evaluation():
+    logging.info("📊 Evaluation started.")
+    try:
+        summary = evaluate_quality(save_to_db=True)
+        logging.info(f"✅ Evaluation summary: {summary}")
+    except Exception as e:
+        logging.exception(f"❌ Evaluation failed: {e}")
+
+def start_scheduler():
+    scheduler = BackgroundScheduler(timezone="Asia/Kolkata")
+    scheduler.add_job(job_tag_enrichment, "cron", hour=1, id="tag_enrichment")
+    scheduler.add_job(job_evaluation, "cron", hour=2, id="evaluation")
+    scheduler.start()
+    logging.info("🚀 Scheduler started with daily tag & evaluation jobs.")
+```
+
+---
+
+## 🚀 `backend/main.py`
+
+```python
+import threading
+import uvicorn
+from backend.api import app
+from backend.scheduler import start_scheduler
+
+def start_fastapi():
+    uvicorn.run(app, host="0.0.0.0", port=8000, reload=False)
+
+if __name__ == "__main__":
+    t = threading.Thread(target=start_scheduler, daemon=True)
+    t.start()
+    start_fastapi()
+```
+
+---
+
+## 💬 `frontend/app.py` (Gradio UI)
+
+```python
+import gradio as gr
+import requests
+
+API_URL = "http://localhost:8000"
+
+def chat(query):
+    r = requests.get(f"{API_URL}/query", params={"q": query}).json()
+    results = r.get("results", [])
+    display = "\n\n".join([
+        f"**{r['title']}**\nScore: {r['score']:.2f}\n{r['url']}\n---"
+        for r in results
+    ]) if results else "No relevant results found."
+    return display, results
+
+def record_feedback(query, result_idx, feedback, results_state):
+    if results_state and 0 <= result_idx < len(results_state):
+        page = results_state[result_idx]
+        requests.post(f"{API_URL}/feedback", params={
+            "q": query,
+            "page_id": page["page_id"],
+            "feedback": feedback
+        })
+        return f"✅ Feedback '{feedback}' saved for: {page['title']}"
+    return "⚠️ Invalid feedback target."
+
+with gr.Blocks() as demo:
+    gr.Markdown("# 🧠 Equity & Margin Support Bot")
+
+    query = gr.Textbox(label="Ask your question")
+    output = gr.Markdown()
+    results_state = gr.State()
+
+    submit = gr.Button("Search")
+    submit.click(fn=chat, inputs=query, outputs=[output, results_state])
+
+    with gr.Row():
+        idx = gr.Number(label="Result index", value=0)
+        good_btn = gr.Button("👍 Good")
+        bad_btn = gr.Button("👎 Bad")
+
+    feedback_msg = gr.Textbox(interactive=False)
+    good_btn.click(lambda q, i, r: record_feedback(q, i, "good", r),
+                   [query, idx, results_state], feedback_msg)
+    bad_btn.click(lambda q, i, r: record_feedback(q, i, "bad", r),
+                  [query, idx, results_state], feedback_msg)
+
+demo.launch(server_port=7860)
+```
+
+---
+
+## 🧪 Run Instructions
+
+1. **Start backend (FastAPI + Scheduler):**
+
+   ```bash
+   python backend/main.py
+   ```
+
+   * Backend API → [http://localhost:8000](http://localhost:8000)
+   * Scheduler logs → `logs/scheduler.log`
+
+2. **Start Gradio frontend:**
+
+   ```bash
+   python frontend/app.py
+   ```
+
+   * UI → [http://localhost:7860](http://localhost:7860)
+   * Queries/Feedback → Sent via backend APIs
+
+---
+
+## 🧭 Next Steps (for Long-Term Scalability)
+
+1. **Add Auth Middleware** → Azure AD / SSO in FastAPI
+2. **Add Domain Configs** → For multi-space Confluence content
+3. **Add “/train” endpoint** → For embedding updates when LLM access is available
+4. **Add Slack/Email alerts** when feedback quality < threshold
+5. **Dashboard** for daily tag & evaluation summary (Grafana or Streamlit)
+
+---
