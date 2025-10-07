@@ -147,8 +147,9 @@ KEYWORD_TAGS = {
     "restart": "Recovery"
 }
 
-def enrich_tags():
-    docs = pages_collection.find()
+def enrich_tags(page_ids=None):
+    query = {} if not page_ids else {"page_id": {"$in": page_ids}}
+    docs = pages_collection.find(query)
     for doc in docs:
         tags = set(doc.get("tags", []))
         text = (doc.get("content") or "").lower()
@@ -156,6 +157,7 @@ def enrich_tags():
             if re.search(rf"\b{k}\b", text):
                 tags.add(v)
         pages_collection.update_one({"_id": doc["_id"]}, {"$set": {"tags": list(tags)}})
+
 ```
 
 ---
@@ -279,7 +281,9 @@ def evaluate_quality(save_to_db=False):
 ### **scripts/load_pages_to_db.py**
 
 ```python
+# scripts/load_pages_to_db.py
 import json
+import sys
 from core.mongo_client import mongo_manager
 
 def load_pages(json_file_path, overwrite=False):
@@ -307,27 +311,77 @@ def load_pages(json_file_path, overwrite=False):
         pages_col.update_one({"page_id": doc["page_id"]}, {"$set": doc}, upsert=True)
 
     print(f"Loaded {len(pages)} pages into MongoDB.")
+
+if __name__ == "__main__":
+    if len(sys.argv) < 2:
+        print("Usage: python load_pages_to_db.py <json_file_path> [overwrite]")
+        sys.exit(1)
+
+    json_file_path = sys.argv[1]
+    overwrite_flag = False
+
+    if len(sys.argv) > 2:
+        arg = sys.argv[2].lower()
+        if arg in ("true", "1", "yes"):
+            overwrite_flag = True
+
+    load_pages(json_file_path, overwrite_flag)
+
 ```
 
 ### **scripts/run_tag_enrichment.py**
 
 ```python
+# scripts/run_tag_enrichment.py
+import sys
+import argparse
 from core.tag_enricher import enrich_tags
 
-if __name__ == "__main__":
-    print("Running tag enrichment...")
-    enrich_tags()
+def main():
+    parser = argparse.ArgumentParser(description="Run tag enrichment on pages.")
+    parser.add_argument("--pages", nargs="*", help="Optional list of page IDs to enrich. Enrich all if not provided.")
+    parser.add_argument("--verbose", action="store_true", help="Print detailed logs")
+
+    args = parser.parse_args()
+
+    if args.pages:
+        if args.verbose:
+            print(f"Enriching tags for {len(args.pages)} specified pages...")
+        enrich_tags(page_ids=args.pages)
+    else:
+        if args.verbose:
+            print("Enriching tags for all pages...")
+        enrich_tags()
+
     print("Tag enrichment completed.")
+
+if __name__ == "__main__":
+    main()
+
 ```
 
 ### **scripts/run_feedback_update.py**
 
 ```python
+# scripts/run_feedback_update.py
+import argparse
 from core.evaluator import evaluate_quality
 
-if __name__ == "__main__":
+def main():
+    parser = argparse.ArgumentParser(description="Evaluate feedback quality.")
+    parser.add_argument("--save", type=bool, default=True, help="Save evaluation results to MongoDB")
+    parser.add_argument("--summary", action="store_true", help="Only print summary without saving")
+
+    args = parser.parse_args()
+
+    save_flag = args.save and not args.summary
     print("Running feedback evaluation...")
-    evaluate_quality(save_to_db=True)
+    evaluate_quality(save_to_db=save_flag)
+    print("Evaluation completed.")
+
+if __name__ == "__main__":
+    main()
+
 ```
 
 ---
@@ -376,6 +430,254 @@ python frontend/app.py
 
 ---
 
-If you want, I can **also add an automatic feedback-based ranking update + admin APIs** to allow **manual trigger of tag enrichment, evaluation, or weight adjustments** directly from FastAPI, so L2 support can manage without touching MongoDB.
+Perfect! Let’s update **`run_tag_enrichment.py`** and **`run_feedback_update.py`** so they accept command-line parameters for flexibility. This way, both scripts can be run manually with options or scheduled automatically.
 
-Do you want me to do that next?
+---
+
+## **1️⃣ scripts/run_tag_enrichment.py**
+
+We’ll allow:
+
+* `--pages` → optional, specify a subset of page IDs to enrich
+* `--verbose` → optional, print detailed output
+
+```python
+# scripts/run_tag_enrichment.py
+import sys
+import argparse
+from core.tag_enricher import enrich_tags
+
+def main():
+    parser = argparse.ArgumentParser(description="Run tag enrichment on pages.")
+    parser.add_argument("--pages", nargs="*", help="Optional list of page IDs to enrich. Enrich all if not provided.")
+    parser.add_argument("--verbose", action="store_true", help="Print detailed logs")
+
+    args = parser.parse_args()
+
+    if args.pages:
+        if args.verbose:
+            print(f"Enriching tags for {len(args.pages)} specified pages...")
+        enrich_tags(page_ids=args.pages)
+    else:
+        if args.verbose:
+            print("Enriching tags for all pages...")
+        enrich_tags()
+
+    print("Tag enrichment completed.")
+
+if __name__ == "__main__":
+    main()
+```
+
+**Update `core/tag_enricher.py`** to accept optional `page_ids`:
+
+```python
+def enrich_tags(page_ids=None):
+    query = {} if not page_ids else {"page_id": {"$in": page_ids}}
+    docs = pages_collection.find(query)
+    for doc in docs:
+        tags = set(doc.get("tags", []))
+        text = (doc.get("content") or "").lower()
+        for k, v in KEYWORD_TAGS.items():
+            if re.search(rf"\b{k}\b", text):
+                tags.add(v)
+        pages_collection.update_one({"_id": doc["_id"]}, {"$set": {"tags": list(tags)}})
+```
+
+**Now you can run:**
+
+```bash
+# Enrich all pages
+python scripts/run_tag_enrichment.py --verbose
+
+# Enrich specific pages
+python scripts/run_tag_enrichment.py --pages 123 456 --verbose
+```
+
+---
+
+## **2️⃣ scripts/run_feedback_update.py**
+
+We’ll allow:
+
+* `--save` → save evaluation results to MongoDB (default True)
+* `--summary` → only print summary, do not save
+
+```python
+# scripts/run_feedback_update.py
+import argparse
+from core.evaluator import evaluate_quality
+
+def main():
+    parser = argparse.ArgumentParser(description="Evaluate feedback quality.")
+    parser.add_argument("--save", type=bool, default=True, help="Save evaluation results to MongoDB")
+    parser.add_argument("--summary", action="store_true", help="Only print summary without saving")
+
+    args = parser.parse_args()
+
+    save_flag = args.save and not args.summary
+    print("Running feedback evaluation...")
+    evaluate_quality(save_to_db=save_flag)
+    print("Evaluation completed.")
+
+if __name__ == "__main__":
+    main()
+```
+
+**Run examples:**
+
+```bash
+# Evaluate feedback and save results
+python scripts/run_feedback_update.py
+
+# Evaluate feedback and only print summary
+python scripts/run_feedback_update.py --summary
+```
+
+---
+
+✅ **Now all scripts are fully parameterized and flexible:**
+
+* `load_pages_to_db.py` → load JSON, optional overwrite
+* `run_tag_enrichment.py` → enrich all or specific pages, optional verbose logs
+* `run_feedback_update.py` → evaluate feedback, optional save or summary only
+
+This makes them fully compatible with:
+
+* **Scheduler jobs**
+* **Manual admin runs**
+* **Future automated pipelines**
+
+---
+
+Perfect! Let’s update both **scheduler** and **FastAPI admin APIs** so they can **call the scripts using flags**, rather than hardcoding function calls. This makes it consistent, modular, and easier for future expansion.
+
+---
+
+# **1️⃣ Updated Scheduler (`backend/scheduler.py`)**
+
+We’ll use **subprocess** to run the scripts with optional flags:
+
+```python
+import logging
+import subprocess
+from apscheduler.schedulers.background import BackgroundScheduler
+
+logging.basicConfig(
+    filename="logs/scheduler.log",
+    level=logging.INFO,
+    format="%(asctime)s | %(levelname)s | %(message)s",
+)
+
+def run_script(script_path, *args):
+    """Run a Python script with optional command-line arguments."""
+    cmd = ["python", script_path] + list(args)
+    logging.info(f"Running script: {' '.join(cmd)}")
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, check=True)
+        logging.info(f"Script output:\n{result.stdout}")
+    except subprocess.CalledProcessError as e:
+        logging.exception(f"Script failed: {e.stderr}")
+
+def job_tag_enrichment():
+    logging.info("🏷️ Scheduled tag enrichment started.")
+    run_script("scripts/run_tag_enrichment.py", "--verbose")
+    logging.info("🏷️ Scheduled tag enrichment finished.")
+
+def job_feedback_evaluation():
+    logging.info("📊 Scheduled feedback evaluation started.")
+    run_script("scripts/run_feedback_update.py")
+    logging.info("📊 Scheduled feedback evaluation finished.")
+
+def start_scheduler():
+    scheduler = BackgroundScheduler(timezone="Asia/Kolkata")
+    scheduler.add_job(job_tag_enrichment, "cron", hour=1, id="tag_enrichment")
+    scheduler.add_job(job_feedback_evaluation, "cron", hour=2, id="feedback_evaluation")
+    scheduler.start()
+    logging.info("🚀 Scheduler started with daily tag & evaluation jobs.")
+```
+
+✅ Now the scheduler **runs the actual scripts** with proper logging.
+
+---
+
+# **2️⃣ Updated FastAPI Admin APIs (`backend/api.py`)**
+
+We’ll add endpoints that **trigger scripts with flags**, so L2/support staff can manage without touching the server directly.
+
+```python
+from fastapi import FastAPI, Query
+import subprocess
+
+app = FastAPI(title="Confluence Chatbot API")
+
+def run_script(script_path, *args):
+    cmd = ["python", script_path] + list(args)
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, check=True)
+        return {"status": "success", "output": result.stdout}
+    except subprocess.CalledProcessError as e:
+        return {"status": "error", "error": e.stderr}
+
+@app.get("/query")
+def query_bot(q: str = Query(...)):
+    from core.search_engine import hybrid_search
+    results = hybrid_search(q)
+    return {"query": q, "results": results}
+
+@app.post("/feedback")
+def feedback(q: str, page_id: str, feedback: str):
+    from core.feedback_handler import save_feedback
+    save_feedback(q, page_id, feedback)
+    return {"status": "success"}
+
+@app.post("/admin/enrich_tags")
+def admin_enrich_tags(pages: str = None, verbose: bool = True):
+    """Trigger tag enrichment manually via API."""
+    args = []
+    if pages:
+        args += pages.split(",")
+    if verbose:
+        args.append("--verbose")
+    return run_script("scripts/run_tag_enrichment.py", *args)
+
+@app.post("/admin/evaluate_feedback")
+def admin_evaluate_feedback(save: bool = True, summary: bool = False):
+    """Trigger feedback evaluation manually via API."""
+    args = []
+    if not save:
+        args.append("--summary")
+    return run_script("scripts/run_feedback_update.py", *args)
+```
+
+**Usage examples (FastAPI endpoints):**
+
+* **Trigger full tag enrichment with verbose logs:**
+
+```
+POST /admin/enrich_tags
+```
+
+* **Enrich specific pages (comma-separated page_ids):**
+
+```
+POST /admin/enrich_tags?pages=123,456
+```
+
+* **Run feedback evaluation without saving to DB (summary only):**
+
+```
+POST /admin/evaluate_feedback?save=false
+```
+
+---
+
+# **✅ Benefits of this approach**
+
+1. **Centralized execution**: Both scheduler and admin API use the **same scripts**, so logic is not duplicated.
+2. **Flag-driven**: Easily add new command-line flags in scripts, scheduler, and API.
+3. **Junior developer-friendly**: To add a new admin operation, just create a script + API endpoint.
+4. **Logging & Debugging**: Scheduler logs all outputs to `logs/scheduler.log` and API returns stdout/stderr.
+
+---
+
